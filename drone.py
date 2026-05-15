@@ -1,130 +1,174 @@
-from ultralytics import YOLO
-from djitellopy import Tello
 import cv2
+import mediapipe as mp
+import numpy as np
+import time
+
+# ─────────────────────────────
+# CONFIG
+# ─────────────────────────────
+FRAME_W = 960
+FRAME_H = 720
+
+# ─────────────────────────────
+# MODELS
+# ─────────────────────────────
+mp_pose = mp.solutions.pose
+mp_hands = mp.solutions.hands
+
+pose = mp_pose.Pose(
+    static_image_mode=False,
+    model_complexity=1,
+    smooth_landmarks=True,
+    min_detection_confidence=0.6,
+    min_tracking_confidence=0.6,
+)
+
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=2,
+    min_detection_confidence=0.6,
+    min_tracking_confidence=0.6,
+)
+
+POSE_LM = mp_pose.PoseLandmark
 
 
-# ---------------- IoU ----------------
-def iou(boxA, boxB):
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[2], boxB[2])
-    yB = min(boxA[3], boxB[3])
+# ─────────────────────────────
+# HELPERS
+# ─────────────────────────────
+def is_full_body(pose_res):
+    if not pose_res.pose_landmarks:
+        return False
 
-    interArea = max(0, xB - xA) * max(0, yB - yA)
-
-    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-
-    unionArea = boxAArea + boxBArea - interArea
-
-    return interArea / unionArea if unionArea != 0 else 0
-
-
-# ---------------- Pose → Box ----------------
-def pose_to_box(kp):
-    x_coords = kp[:, 0]
-    y_coords = kp[:, 1]
-
-    return (
-        int(min(x_coords)),
-        int(min(y_coords)),
-        int(max(x_coords)),
-        int(max(y_coords))
+    visible = sum(
+        1 for lm in pose_res.pose_landmarks.landmark
+        if lm.visibility > 0.6
     )
 
-
-# ---------------- MODELS ----------------
-detector = YOLO("yolov8n.pt")
-pose = YOLO("yolov8n-pose.pt")
+    return visible > 20
 
 
-# ---------------- DRONE ----------------
-tello = Tello()
-tello.connect()
-print("Battery:", tello.get_battery())
+def draw_pose(frame, pose_res):
+    h, w = frame.shape[:2]
 
-tello.streamon()
-frame_read = tello.get_frame_read()
+    if not pose_res.pose_landmarks:
+        return
+
+    lm = pose_res.pose_landmarks.landmark
+
+    for i, l in enumerate(lm):
+        x, y = int(l.x * w), int(l.y * h)
+        cv2.circle(frame, (x, y), 3, (0, 255, 0), -1)
 
 
-# ---------------- MAIN LOOP ----------------
-while True:
+def draw_hands(frame, hand_res):
+    h, w = frame.shape[:2]
 
-    frame = frame_read.frame
-    if frame is None:
-        continue
+    if not hand_res.multi_hand_landmarks:
+        return
 
-    frame = cv2.resize(frame, (640, 480))
+    for hand in hand_res.multi_hand_landmarks:
+        for lm in hand.landmark:
+            x, y = int(lm.x * w), int(lm.y * h)
+            cv2.circle(frame, (x, y), 3, (255, 0, 0), -1)
 
-    # -------- DETECTION --------
-    det_results = detector(frame, classes=[0], verbose=False)
 
-    detection_boxes = []
-    for r in det_results:
-        if r.boxes is None:
+def detect_hand_motion(hand_res):
+    if not hand_res.multi_hand_landmarks:
+        return []
+
+    actions = []
+
+    for hand in hand_res.multi_hand_landmarks:
+        wrist = hand.landmark[0]
+        index = hand.landmark[8]
+
+        dx = abs(index.x - wrist.x)
+        dy = abs(index.y - wrist.y)
+
+        # simple pinch / gesture heuristics
+        if dx < 0.03 and dy < 0.03:
+            actions.append("Pinch-like gesture")
+
+        if dy < 0.05 and index.y < wrist.y:
+            actions.append("Hand raised")
+
+    return actions
+
+
+# ─────────────────────────────
+# MAIN LOOP
+# ─────────────────────────────
+def main():
+
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
+
+    fps_t = time.time()
+    fps = 0
+
+    print("[READY] Running hybrid body-part system")
+
+    while True:
+
+        ret, frame = cap.read()
+        if not ret:
             continue
-        for box in r.boxes.xyxy.cpu().numpy():
-            x1, y1, x2, y2 = map(int, box)
-            detection_boxes.append((x1, y1, x2, y2))
 
-    # -------- POSE --------
-    pose_results = pose(frame, verbose=False)
+        frame = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    pose_boxes = []
-    keypoints_list = []
+        pose_res = pose.process(rgb)
+        hand_res = hands.process(rgb)
 
-    for r in pose_results:
-        if r.keypoints is None:
-            continue
+        mode = "UNKNOWN"
 
-        kps = r.keypoints.xy.cpu().numpy()
+        if is_full_body(pose_res):
+            mode = "FULL_BODY"
+        elif hand_res.multi_hand_landmarks and not pose_res.pose_landmarks:
+            mode = "HAND_ONLY"
 
-        for person_kp in kps:
-            pose_boxes.append(pose_to_box(person_kp))
-            keypoints_list.append(person_kp)
+        # ─────────────────────────────
+        # DRAWING
+        # ─────────────────────────────
 
-    # -------- IoU MATCHING --------
-    matches = []
+        if mode == "FULL_BODY":
+            draw_pose(frame, pose_res)
 
-    for det_box in detection_boxes:
+        draw_hands(frame, hand_res)
 
-        best_iou = 0
-        best_idx = -1
+        # ─────────────────────────────
+        # HAND LOGIC (ALWAYS ACTIVE)
+        # ─────────────────────────────
+        hand_actions = detect_hand_motion(hand_res)
 
-        for i, pose_box in enumerate(pose_boxes):
+        y = 30
+        cv2.putText(frame, f"Mode: {mode}", (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
 
-            score = iou(det_box, pose_box)
+        for i, act in enumerate(hand_actions):
+            cv2.putText(frame, act, (10, y + 30 + i*25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,200,255), 2)
 
-            if score > best_iou:
-                best_iou = score
-                best_idx = i
+        # ─────────────────────────────
+        # FPS
+        # ─────────────────────────────
+        now = time.time()
+        fps = 0.9 * fps + 0.1 * (1.0 / max(now - fps_t, 1e-6))
+        fps_t = now
 
-        if best_iou > 0.3 and best_idx != -1:
-            matches.append((det_box, keypoints_list[best_idx]))
+        cv2.putText(frame, f"FPS: {fps:.1f}", (10, FRAME_H - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
 
-    # -------- DRAW RESULTS --------
-    annotated = frame.copy()
+        cv2.imshow("Body Part Awareness System", frame)
 
-    # draw detections
-    for x1, y1, x2, y2 in detection_boxes:
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 
-    # draw pose
-    for person in keypoints_list:
-        for x, y in person:
-            cv2.circle(annotated, (int(x), int(y)), 3, (0, 255, 0), -1)
-
-    # highlight matched pairs
-    for det_box, kp in matches:
-        x1, y1, x2, y2 = det_box
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 3)
-
-    cv2.imshow("Dual System (IoU Merged)", annotated)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    cap.release()
+    cv2.destroyAllWindows()
 
 
-# ---------------- CLEANUP ----------------
-tello.streamoff()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
