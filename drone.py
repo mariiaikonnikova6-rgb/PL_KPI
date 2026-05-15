@@ -2,6 +2,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import time
+from djitellopy import Tello
 
 # ─────────────────────────────
 # CONFIG
@@ -30,9 +31,6 @@ hands = mp_hands.Hands(
     min_tracking_confidence=0.6,
 )
 
-POSE_LM = mp_pose.PoseLandmark
-
-
 # ─────────────────────────────
 # HELPERS
 # ─────────────────────────────
@@ -44,29 +42,24 @@ def is_full_body(pose_res):
         1 for lm in pose_res.pose_landmarks.landmark
         if lm.visibility > 0.6
     )
-
     return visible > 20
 
 
 def draw_pose(frame, pose_res):
-    h, w = frame.shape[:2]
-
     if not pose_res.pose_landmarks:
         return
 
-    lm = pose_res.pose_landmarks.landmark
-
-    for i, l in enumerate(lm):
+    h, w = frame.shape[:2]
+    for l in pose_res.pose_landmarks.landmark:
         x, y = int(l.x * w), int(l.y * h)
         cv2.circle(frame, (x, y), 3, (0, 255, 0), -1)
 
 
 def draw_hands(frame, hand_res):
-    h, w = frame.shape[:2]
-
     if not hand_res.multi_hand_landmarks:
         return
 
+    h, w = frame.shape[:2]
     for hand in hand_res.multi_hand_landmarks:
         for lm in hand.landmark:
             x, y = int(lm.x * w), int(lm.y * h)
@@ -86,7 +79,6 @@ def detect_hand_motion(hand_res):
         dx = abs(index.x - wrist.x)
         dy = abs(index.y - wrist.y)
 
-        # simple pinch / gesture heuristics
         if dx < 0.03 and dy < 0.03:
             actions.append("Pinch-like gesture")
 
@@ -97,26 +89,32 @@ def detect_hand_motion(hand_res):
 
 
 # ─────────────────────────────
-# MAIN LOOP
+# MAIN
 # ─────────────────────────────
 def main():
 
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
+    tello = Tello()
+    tello.connect()
+
+    print(f"[DRONE] Battery: {tello.get_battery()}%")
+
+    tello.streamon()
+    frame_reader = tello.get_frame_read()
 
     fps_t = time.time()
     fps = 0
 
-    print("[READY] Running hybrid body-part system")
+    print("[READY] Drone vision pipeline running")
 
     while True:
 
-        ret, frame = cap.read()
-        if not ret:
+        frame = frame_reader.frame
+        if frame is None:
             continue
 
+        frame = cv2.resize(frame, (FRAME_W, FRAME_H))
         frame = cv2.flip(frame, 1)
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         pose_res = pose.process(rgb)
@@ -132,24 +130,23 @@ def main():
         # ─────────────────────────────
         # DRAWING
         # ─────────────────────────────
-
         if mode == "FULL_BODY":
             draw_pose(frame, pose_res)
 
         draw_hands(frame, hand_res)
 
         # ─────────────────────────────
-        # HAND LOGIC (ALWAYS ACTIVE)
+        # HAND LOGIC
         # ─────────────────────────────
         hand_actions = detect_hand_motion(hand_res)
 
         y = 30
         cv2.putText(frame, f"Mode: {mode}", (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         for i, act in enumerate(hand_actions):
-            cv2.putText(frame, act, (10, y + 30 + i*25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,200,255), 2)
+            cv2.putText(frame, act, (10, y + 30 + i * 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
 
         # ─────────────────────────────
         # FPS
@@ -159,14 +156,15 @@ def main():
         fps_t = now
 
         cv2.putText(frame, f"FPS: {fps:.1f}", (10, FRAME_H - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-        cv2.imshow("Body Part Awareness System", frame)
+        cv2.imshow("Drone Body Tracking", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
-    cap.release()
+    tello.streamoff()
+    tello.end()
     cv2.destroyAllWindows()
 
 
