@@ -112,12 +112,11 @@ def draw_panel(canvas, battery, fps, avg_light=None):
     cv2.rectangle(overlay, (px, 0), (DISPLAY_W, DISPLAY_H), (245, 245, 245), -1)
     cv2.addWeighted(overlay, 0.88, canvas, 0.12, 0, canvas)
 
-    # Лінія-розділювач
     cv2.line(canvas, (px, 0), (px, DISPLAY_H), (0, 200, 255), 2)
 
     y = 20
 
-    # ——— ЛОГОТИП (без білого фону) ———
+
     logo = cv2.imread(
         r"C:\Users\Khrystyna PC\Desktop\PythonProject\PythonProject\logo.png",
         cv2.IMREAD_UNCHANGED
@@ -145,7 +144,7 @@ def draw_panel(canvas, battery, fps, avg_light=None):
     cv2.line(canvas, (px+10, y), (DISPLAY_W-10, y), (180, 180, 180), 1)
     y += 14
 
-    # ——— ДОПОМІЖНІ ФУНКЦІЇ ———
+  
     def section_title(text, yy):
         cv2.putText(canvas, text, (px+10, yy),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
@@ -158,7 +157,7 @@ def draw_panel(canvas, battery, fps, avg_light=None):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
         return yy + 16
 
-    # ——— SYSTEM ———
+ 
     y = section_title("SYSTEM", y)
     bat_color = (0, 150, 0) if battery > 30 else (0, 0, 200)
     y = info_row("Battery:", f"{battery}%", bat_color, y)
@@ -178,7 +177,6 @@ def draw_panel(canvas, battery, fps, avg_light=None):
     cv2.line(canvas, (px+10, y), (DISPLAY_W-10, y), (180, 180, 180), 1)
     y += 14
 
-    # ——— DETECTION STATUS ———
     y = section_title("DETECTION STATUS", y)
     statuses = [
         ("PERSON",            (0, 180, 0)),
@@ -195,7 +193,7 @@ def draw_panel(canvas, battery, fps, avg_light=None):
     cv2.line(canvas, (px+10, y), (DISPLAY_W-10, y), (180, 180, 180), 1)
     y += 14
 
-    # ——— BODY PARTS ———
+  
     y = section_title("BODY PARTS", y)
     parts = [
         ("Head",     (0, 0, 200)),
@@ -216,7 +214,7 @@ def draw_panel(canvas, battery, fps, avg_light=None):
     cv2.line(canvas, (px+10, y), (DISPLAY_W-10, y), (180, 180, 180), 1)
     y += 14
 
-    # ——— FUNCTIONS ———
+    
     y = section_title("FUNCTIONS", y)
 
     def toggle_row(key, label, state, yy):
@@ -244,7 +242,7 @@ def draw_panel(canvas, battery, fps, avg_light=None):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
 
-# ——— ГОЛОВНИЙ ЦИКЛ ———
+
 battery = tello.get_battery()
 VIDEO_W = DISPLAY_W - PANEL_W
 VIDEO_H = DISPLAY_H
