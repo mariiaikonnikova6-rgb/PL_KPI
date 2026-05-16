@@ -14,25 +14,25 @@ model = YOLO("yolov8n-pose.pt")
 cap = tello.get_frame_read()
 
 KEYPOINT_NAMES = {
-    0: "Nose",        1: "Left Eye",      2: "Right Eye",
-    3: "Left Ear",    4: "Right Ear",
+    0: "Nose",          1: "Left Eye",      2: "Right Eye",
+    3: "Left Ear",      4: "Right Ear",
     5: "Left Shoulder", 6: "Right Shoulder",
-    7: "Left Elbow",  8: "Right Elbow",
-    9: "Left Wrist",  10: "Right Wrist",
-    11: "Left Hip",   12: "Right Hip",
-    13: "Left Knee",  14: "Right Knee",
-    15: "Left Ankle", 16: "Right Ankle",
+    7: "Left Elbow",    8: "Right Elbow",
+    9: "Left Wrist",    10: "Right Wrist",
+    11: "Left Hip",     12: "Right Hip",
+    13: "Left Knee",    14: "Right Knee",
+    15: "Left Ankle",   16: "Right Ankle",
 }
 
 KEYPOINT_COLORS = {
-    0:  (255, 255, 0),   1:  (255, 255, 0),   2:  (255, 255, 0),
-    3:  (255, 255, 0),   4:  (255, 255, 0),
-    5:  (0, 165, 255),   6:  (0, 165, 255),
-    7:  (0, 255, 255),   8:  (0, 255, 255),
-    9:  (0, 255, 0),     10: (0, 255, 0),
-    11: (255, 0, 255),   12: (255, 0, 255),
-    13: (0, 0, 255),     14: (0, 0, 255),
-    15: (255, 165, 0),   16: (255, 165, 0),
+    0:  (255, 255, 0),  1:  (255, 255, 0),  2:  (255, 255, 0),
+    3:  (255, 255, 0),  4:  (255, 255, 0),
+    5:  (0, 165, 255),  6:  (0, 165, 255),
+    7:  (0, 255, 255),  8:  (0, 255, 255),
+    9:  (0, 255, 0),    10: (0, 255, 0),
+    11: (255, 0, 255),  12: (255, 0, 255),
+    13: (0, 0, 255),    14: (0, 0, 255),
+    15: (255, 165, 0),  16: (255, 165, 0),
 }
 
 SKELETON = [
@@ -43,6 +43,7 @@ SKELETON = [
 ]
 
 CONF = 0.4
+light_detection_on = True
 
 
 def analyze_body(keypoints, i):
@@ -88,7 +89,7 @@ def analyze_light(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     avg_brightness = gray.mean()
 
-    _, bright_mask = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+    _, bright_mask = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
     bright_pixels = cv2.countNonZero(bright_mask)
     bright_ratio = bright_pixels / (frame.shape[0] * frame.shape[1])
 
@@ -102,12 +103,12 @@ def analyze_light(frame):
         light_status = f"LIGHT OK  avg={int(avg_brightness)}"
         light_color = (0, 255, 0)
 
-    signal_detected = bright_ratio > 0.015 and avg_brightness < 100
+    signal_detected = bright_ratio > 0.005 and avg_brightness < 160
 
     return light_status, light_color, signal_detected, bright_mask
 
 
-print("Stream starting... press Q to quit")
+print("Stream starting... press L to toggle light detection, Q to quit")
 
 while True:
     frame = cap.frame
@@ -116,27 +117,32 @@ while True:
 
     frame = cv2.resize(frame, (640, 480))
 
-    light_status, light_color, signal_detected, bright_mask = analyze_light(frame)
+    if light_detection_on:
+        light_status, light_color, signal_detected, bright_mask = analyze_light(frame)
 
-    cv2.putText(frame, light_status,
-                (frame.shape[1] - 310, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, light_color, 2)
+        cv2.putText(frame, light_status,
+                    (frame.shape[1] - 310, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, light_color, 2)
 
-    if signal_detected:
-        cv2.putText(frame, ">>> SIGNAL LIGHT DETECTED <<<",
-                    (frame.shape[1] // 2 - 185, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        if signal_detected:
+            cv2.putText(frame, ">>> SIGNAL LIGHT DETECTED <<<",
+                        (frame.shape[1] // 2 - 185, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-        contours, _ = cv2.findContours(
-            bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        for cnt in contours:
-            if cv2.contourArea(cnt) > 25:
-                x, y, w, h = cv2.boundingRect(cnt)
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
-                cv2.putText(frame, "LIGHT",
-                            (x, y - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            contours, _ = cv2.findContours(
+                bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for cnt in contours:
+                if cv2.contourArea(cnt) > 25:
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
+                    cv2.putText(frame, "LIGHT",
+                                (x, y - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    else:
+        cv2.putText(frame, "LIGHT DETECT: OFF",
+                    (frame.shape[1] - 310, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 2)
 
     results = model(frame, classes=[0], verbose=False)
 
@@ -207,12 +213,17 @@ while True:
     cv2.putText(frame, "CYAN   = Signal light",    (10, 394), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
     cv2.putText(frame, "YELLOW=Head  ORANGE=Shoulder  CYAN=Elbow", (10, 416), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
     cv2.putText(frame, "GREEN=Wrist  PURPLE=Hip  RED=Knee",         (10, 434), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-    cv2.putText(frame, "Q - quit",                                  (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(frame, "L - toggle light  |  Q - quit",            (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
     cv2.imshow("Fragment Rescue AI", frame)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('q'):
         break
+    elif key == ord('l'):
+        light_detection_on = not light_detection_on
+        state = "ON" if light_detection_on else "OFF"
+        print(f"Light detection: {state}")
 
 tello.streamoff()
 cv2.destroyAllWindows()
