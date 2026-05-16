@@ -9,7 +9,6 @@ FRAME_H = 240
 
 MODEL_PATH = "yolov8n-pose.pt"
 
-DETECTION_INTERVAL = 2
 DETECT_CONF = 0.25
 KP_CONF = 0.25
 
@@ -18,6 +17,7 @@ LIGHT_AREA_MIN = 40
 
 DISPLAY_W = 1280
 DISPLAY_H = 720
+PANEL_W = 260
 
 tello = Tello()
 tello.connect()
@@ -29,13 +29,9 @@ cap = tello.get_frame_read()
 model = YOLO(MODEL_PATH)
 
 SKELETON = [
-    (5, 7), (7, 9),
-    (6, 8), (8, 10),
-    (5, 6),
-    (5, 11), (6, 12),
-    (11, 12),
-    (11, 13), (13, 15),
-    (12, 14), (14, 16),
+    (5, 7), (7, 9), (6, 8), (8, 10),
+    (5, 6), (5, 11), (6, 12), (11, 12),
+    (11, 13), (13, 15), (12, 14), (14, 16),
 ]
 
 LIMBS = {
@@ -48,65 +44,50 @@ LIMBS = {
 }
 
 KP_COLORS = {
-    0:  (0, 0, 255),
-    1:  (0, 0, 255),
-    2:  (0, 0, 255),
-    3:  (0, 0, 255),
-    4:  (0, 0, 255),
-    5:  (0, 165, 255),
-    6:  (0, 165, 255),
-    7:  (0, 255, 255),
-    8:  (0, 255, 255),
-    9:  (0, 255, 0),
-    10: (0, 255, 0),
-    11: (255, 0, 255),
-    12: (255, 0, 255),
-    13: (255, 100, 0),
-    14: (255, 100, 0),
-    15: (200, 200, 0),
-    16: (200, 200, 0),
+    0:  (0, 0, 200),   1:  (0, 0, 200),
+    2:  (0, 0, 200),   3:  (0, 0, 200),
+    4:  (0, 0, 200),   5:  (0, 130, 200),
+    6:  (0, 130, 200), 7:  (0, 200, 200),
+    8:  (0, 200, 200), 9:  (0, 180, 0),
+    10: (0, 180, 0),   11: (180, 0, 180),
+    12: (180, 0, 180), 13: (200, 80, 0),
+    14: (200, 80, 0),  15: (150, 150, 0),
+    16: (150, 150, 0),
 }
 
 KP_NAMES = {
-    0:  "Nose",
-    1:  "L.Eye",
-    2:  "R.Eye",
-    3:  "L.Ear",
-    4:  "R.Ear",
-    5:  "L.Shoulder",
-    6:  "R.Shoulder",
-    7:  "L.Elbow",
-    8:  "R.Elbow",
-    9:  "L.Wrist",
-    10: "R.Wrist",
-    11: "L.Hip",
-    12: "R.Hip",
-    13: "L.Knee",
-    14: "R.Knee",
-    15: "L.Ankle",
-    16: "R.Ankle",
+    0: "Nose",       1: "L.Eye",      2: "R.Eye",
+    3: "L.Ear",      4: "R.Ear",      5: "L.Shoulder",
+    6: "R.Shoulder", 7: "L.Elbow",    8: "R.Elbow",
+    9: "L.Wrist",   10: "R.Wrist",   11: "L.Hip",
+    12: "R.Hip",    13: "L.Knee",    14: "R.Knee",
+    15: "L.Ankle",  16: "R.Ankle",
 }
 
 cached_results = None
 frame_count = 0
 light_detection_on = True
 light_boost_on = False
+skeleton_on = True
+labels_on = True
+
 
 def limb_visible(kp, indices):
     return sum(1 for idx in indices if kp[idx][2] > KP_CONF) / len(indices)
+
 
 def analyze_pose(person_kp):
     limb_scores = {name: limb_visible(person_kp, idx) for name, idx in LIMBS.items()}
     strong_limbs = sum(s >= 0.5 for s in limb_scores.values())
     avg_score = np.mean(list(limb_scores.values()))
-
     if avg_score > 0.55:
-        return {"status": "PERSON",            "color": (0, 255, 0),   "scores": limb_scores}
+        return {"status": "PERSON",            "color": (0, 200, 0),   "scores": limb_scores}
     elif strong_limbs >= 2:
-        return {"status": "BODY FRAGMENT",     "color": (0, 165, 255), "scores": limb_scores}
+        return {"status": "BODY FRAGMENT",     "color": (0, 130, 255), "scores": limb_scores}
     elif strong_limbs >= 1:
-        return {"status": "POSSIBLE SURVIVOR", "color": (0, 0, 255),   "scores": limb_scores}
+        return {"status": "POSSIBLE SURVIVOR", "color": (0, 0, 220),   "scores": limb_scores}
     return None
+
 
 def analyze_light(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -122,85 +103,161 @@ def analyze_light(frame):
             detections.append((x, y, w, h))
     return avg, detections
 
-def draw_top_bar(canvas, battery):
-    cv2.rectangle(canvas, (0, 0), (DISPLAY_W, 50), (15, 15, 15), -1)
-    cv2.line(canvas, (0, 50), (DISPLAY_W, 50), (0, 200, 255), 1)
 
-    logo = cv2.imread(r"C:\Users\Khrystyna PC\Desktop\PythonProject\PythonProject\logo.png", cv2.IMREAD_UNCHANGED)
+def draw_panel(canvas, battery, fps, avg_light=None):
+    px = DISPLAY_W - PANEL_W
+
+    # Напівпрозорий фон панелі
+    overlay = canvas.copy()
+    cv2.rectangle(overlay, (px, 0), (DISPLAY_W, DISPLAY_H), (245, 245, 245), -1)
+    cv2.addWeighted(overlay, 0.88, canvas, 0.12, 0, canvas)
+
+    # Лінія-розділювач
+    cv2.line(canvas, (px, 0), (px, DISPLAY_H), (0, 200, 255), 2)
+
+    y = 20
+
+    # ——— ЛОГОТИП (без білого фону) ———
+    logo = cv2.imread(
+        r"C:\Users\Khrystyna PC\Desktop\PythonProject\PythonProject\logo.png",
+        cv2.IMREAD_UNCHANGED
+    )
     if logo is not None:
-        lh = 40
-        lw = int(logo.shape[1] * lh / logo.shape[0])
-        logo = cv2.resize(logo, (lw, lh))
+        lw = PANEL_W - 20
+        lh = int(logo.shape[0] * lw / logo.shape[1])
+        logo = cv2.resize(logo, (lw, lh), interpolation=cv2.INTER_LANCZOS4)
         if logo.shape[2] == 4:
+            # PNG з прозорістю — накладаємо по альфа-каналу
             alpha = logo[:, :, 3] / 255.0
             for c in range(3):
-                canvas[5:5+lh, 10:10+lw, c] = (
-                    alpha * logo[:, :, c] + (1 - alpha) * canvas[5:5+lh, 10:10+lw, c]
-                )
+                canvas[y:y+lh, px+10:px+10+lw, c] = (
+                    alpha * logo[:, :, c] +
+                    (1 - alpha) * canvas[y:y+lh, px+10:px+10+lw, c]
+                ).astype(np.uint8)
         else:
-            canvas[5:5+lh, 10:10+lw] = logo
+            canvas[y:y+lh, px+10:px+10+lw] = logo
+        y += lh + 12
     else:
-        cv2.putText(canvas, "FRAGMENT RESCUE AI", (12, 34),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, "RESCUE AI", (px+10, y+20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 100, 200), 2, cv2.LINE_AA)
+        y += 40
 
-    bat_color = (0, 255, 0) if battery > 30 else (0, 0, 255)
-    cv2.putText(canvas, f"BAT: {battery}%", (DISPLAY_W - 160, 34),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, bat_color, 2, cv2.LINE_AA)
-    cv2.putText(canvas, time.strftime("%H:%M:%S"), (DISPLAY_W - 340, 34),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 1, cv2.LINE_AA)
+    cv2.line(canvas, (px+10, y), (DISPLAY_W-10, y), (180, 180, 180), 1)
+    y += 14
 
-def draw_bottom_bar(canvas):
-    cv2.rectangle(canvas, (0, DISPLAY_H - 100), (DISPLAY_W, DISPLAY_H), (15, 15, 15), -1)
-    cv2.line(canvas, (0, DISPLAY_H - 100), (DISPLAY_W, DISPLAY_H - 100), (0, 200, 255), 1)
+    # ——— ДОПОМІЖНІ ФУНКЦІЇ ———
+    def section_title(text, yy):
+        cv2.putText(canvas, text, (px+10, yy),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+        return yy + 18
 
+    def info_row(label, value, color, yy):
+        cv2.putText(canvas, label, (px+10, yy),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(canvas, value, (px+120, yy),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+        return yy + 16
+
+    # ——— SYSTEM ———
+    y = section_title("SYSTEM", y)
+    bat_color = (0, 150, 0) if battery > 30 else (0, 0, 200)
+    y = info_row("Battery:", f"{battery}%", bat_color, y)
+    y = info_row("FPS:", str(fps), (0, 0, 0), y)
+    y = info_row("Time:", time.strftime("%H:%M:%S"), (0, 0, 0), y)
+
+    if avg_light is not None:
+        if avg_light < 40:
+            lv, lc = "LOW", (0, 0, 200)
+        elif avg_light > 200:
+            lv, lc = "OVER", (0, 130, 200)
+        else:
+            lv, lc = "OK", (0, 150, 0)
+        y = info_row("Light:", f"{lv} {int(avg_light)}", lc, y)
+
+    y += 6
+    cv2.line(canvas, (px+10, y), (DISPLAY_W-10, y), (180, 180, 180), 1)
+    y += 14
+
+    # ——— DETECTION STATUS ———
+    y = section_title("DETECTION STATUS", y)
     statuses = [
-        ("● PERSON",            (0, 255, 0)),
-        ("● BODY FRAGMENT",     (0, 165, 255)),
-        ("● POSSIBLE SURVIVOR", (0, 0, 255)),
+        ("PERSON",            (0, 180, 0)),
+        ("BODY FRAGMENT",     (0, 100, 200)),
+        ("POSSIBLE SURVIVOR", (0, 0, 200)),
     ]
-    x = 14
     for label, color in statuses:
-        cv2.putText(canvas, label, (x, DISPLAY_H - 68),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
-        (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-        x += tw + 20
+        cv2.circle(canvas, (px+16, y-4), 5, color, -1)
+        cv2.putText(canvas, label, (px+26, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
+        y += 16
 
+    y += 6
+    cv2.line(canvas, (px+10, y), (DISPLAY_W-10, y), (180, 180, 180), 1)
+    y += 14
+
+    # ——— BODY PARTS ———
+    y = section_title("BODY PARTS", y)
     parts = [
-        ("HEAD",     (0, 0, 255)),
-        ("SHOULDER", (0, 165, 255)),
-        ("ELBOW",    (0, 255, 255)),
-        ("WRIST",    (0, 255, 0)),
-        ("HIP",      (255, 0, 255)),
-        ("KNEE",     (255, 100, 0)),
-        ("ANKLE",    (200, 200, 0)),
+        ("Head",     (0, 0, 200)),
+        ("Shoulder", (0, 130, 200)),
+        ("Elbow",    (0, 200, 200)),
+        ("Wrist",    (0, 180, 0)),
+        ("Hip",      (180, 0, 180)),
+        ("Knee",     (200, 80, 0)),
+        ("Ankle",    (150, 150, 0)),
     ]
-    x = 14
     for label, color in parts:
-        cv2.circle(canvas, (x + 6, DISPLAY_H - 40), 6, color, -1)
-        cv2.putText(canvas, label, (x + 16, DISPLAY_H - 34),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
-        (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-        x += tw + 28
+        cv2.circle(canvas, (px+16, y-4), 5, color, -1)
+        cv2.putText(canvas, label, (px+26, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
+        y += 15
 
-    light_clr = (0, 255, 0) if light_detection_on else (100, 100, 100)
-    boost_clr = (0, 255, 255) if light_boost_on else (100, 100, 100)
-    cv2.putText(canvas, "[L] LIGHT DETECT", (DISPLAY_W - 340, DISPLAY_H - 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, light_clr, 1, cv2.LINE_AA)
-    cv2.putText(canvas, "[B] NIGHT BOOST", (DISPLAY_W - 340, DISPLAY_H - 34),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, boost_clr, 1, cv2.LINE_AA)
-    cv2.putText(canvas, "[Q] QUIT", (DISPLAY_W - 130, DISPLAY_H - 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1, cv2.LINE_AA)
+    y += 6
+    cv2.line(canvas, (px+10, y), (DISPLAY_W-10, y), (180, 180, 180), 1)
+    y += 14
 
+    # ——— FUNCTIONS ———
+    y = section_title("FUNCTIONS", y)
+
+    def toggle_row(key, label, state, yy):
+        on_off = "ON" if state else "OFF"
+        clr_box = (0, 180, 0) if state else (180, 0, 0)
+        cv2.rectangle(canvas, (px+10, yy-12), (px+42, yy+4), clr_box, -1)
+        cv2.putText(canvas, on_off, (px+12, yy),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"[{key}] {label}", (px+48, yy),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (40, 40, 40), 1, cv2.LINE_AA)
+        return yy + 20
+
+    y = toggle_row("L", "Light detect", light_detection_on, y)
+    y = toggle_row("B", "Night boost",  light_boost_on,     y)
+    y = toggle_row("S", "Skeleton",     skeleton_on,        y)
+    y = toggle_row("N", "Labels",       labels_on,          y)
+
+    y += 6
+    cv2.line(canvas, (px+10, y), (DISPLAY_W-10, y), (180, 180, 180), 1)
+    y += 14
+
+    # ——— QUIT ———
+    cv2.rectangle(canvas, (px+10, y), (DISPLAY_W-10, y+22), (80, 80, 80), -1)
+    cv2.putText(canvas, "[Q]  QUIT", (px+60, y+15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+
+# ——— ГОЛОВНИЙ ЦИКЛ ———
 battery = tello.get_battery()
+VIDEO_W = DISPLAY_W - PANEL_W
+VIDEO_H = DISPLAY_H
 
-cv2.namedWindow("Rescue AI", cv2.WINDOW_NORMAL)
-cv2.resizeWindow("Rescue AI", DISPLAY_W, DISPLAY_H)
+cv2.namedWindow("Mireon", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("Mireon", DISPLAY_W, DISPLAY_H)
 
-print("Q = quit | L = toggle light | B = night boost")
+print("Q=quit | L=light | B=boost | S=skeleton | N=labels")
 
 fps_timer = time.time()
 fps_counter = 0
 fps = 0
+avg_light_val = None
 
 while True:
     frame = cap.frame
@@ -222,36 +279,29 @@ while True:
                                verbose=False, imgsz=320)
     frame_count += 1
 
-    VIDEO_H = DISPLAY_H - 150
-    VIDEO_W = int(VIDEO_H * 16 / 9)
-    video_x = (DISPLAY_W - VIDEO_W) // 2
+    # Canvas
+    canvas = np.full((DISPLAY_H, DISPLAY_W, 3), 30, dtype=np.uint8)
 
-    canvas = np.zeros((DISPLAY_H, DISPLAY_W, 3), dtype=np.uint8)
+    # Відео на ліву частину
     video_frame = cv2.resize(frame, (VIDEO_W, VIDEO_H))
-    canvas[50:50+VIDEO_H, video_x:video_x+VIDEO_W] = video_frame
+    canvas[0:VIDEO_H, 0:VIDEO_W] = video_frame
 
     scale_x = VIDEO_W / FRAME_W
     scale_y = VIDEO_H / FRAME_H
 
+    # Light detection
     if light_detection_on:
-        avg_light, lights = analyze_light(frame)
-        if avg_light < 40:
+        avg_light_val, lights = analyze_light(frame)
+        if avg_light_val < 40:
             txt, clr = "LOW LIGHT", (0, 0, 255)
-        elif avg_light > 200:
+        elif avg_light_val > 200:
             txt, clr = "OVEREXPOSED", (0, 165, 255)
         else:
-            txt, clr = f"LIGHT OK {int(avg_light)}", (0, 255, 0)
-
-        cv2.putText(canvas, txt, (video_x + 10, 80),
+            txt, clr = f"LIGHT OK {int(avg_light_val)}", (0, 220, 0)
+        cv2.putText(canvas, txt, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, clr, 2, cv2.LINE_AA)
 
-        for (x, y, w, h) in lights:
-            sx = int(x * scale_x) + video_x
-            sy = int(y * scale_y) + 50
-            sw = int(w * scale_x)
-            sh = int(h * scale_y)
-            cv2.rectangle(canvas, (sx, sy), (sx+sw, sy+sh), (255, 255, 0), 1)
-
+    # Детекції
     if cached_results is not None:
         for r in cached_results:
             if r.boxes is None or r.keypoints is None:
@@ -265,81 +315,79 @@ while True:
                     continue
 
                 x1, y1, x2, y2 = map(int, boxes[i].xyxy[0])
-                sx1 = int(x1 * scale_x) + video_x
-                sy1 = int(y1 * scale_y) + 50
-                sx2 = int(x2 * scale_x) + video_x
-                sy2 = int(y2 * scale_y) + 50
+                sx1 = int(x1 * scale_x)
+                sy1 = int(y1 * scale_y)
+                sx2 = int(x2 * scale_x)
+                sy2 = int(y2 * scale_y)
                 color = analysis["color"]
 
                 # Кутова рамка
                 cl = 20
                 for p1, p2 in [
-                    ((sx1,sy1),(sx1+cl,sy1)), ((sx1,sy1),(sx1,sy1+cl)),
-                    ((sx2,sy1),(sx2-cl,sy1)), ((sx2,sy1),(sx2,sy1+cl)),
-                    ((sx1,sy2),(sx1+cl,sy2)), ((sx1,sy2),(sx1,sy2-cl)),
-                    ((sx2,sy2),(sx2-cl,sy2)), ((sx2,sy2),(sx2,sy2-cl)),
+                    ((sx1, sy1), (sx1+cl, sy1)), ((sx1, sy1), (sx1, sy1+cl)),
+                    ((sx2, sy1), (sx2-cl, sy1)), ((sx2, sy1), (sx2, sy1+cl)),
+                    ((sx1, sy2), (sx1+cl, sy2)), ((sx1, sy2), (sx1, sy2-cl)),
+                    ((sx2, sy2), (sx2-cl, sy2)), ((sx2, sy2), (sx2, sy2-cl)),
                 ]:
                     cv2.line(canvas, p1, p2, color, 2)
 
                 # Статус
-                cv2.putText(canvas, analysis["status"],
-                            (sx1, sy1 - 10),
+                (tw, th), _ = cv2.getTextSize(
+                    analysis["status"], cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+                cv2.rectangle(canvas,
+                              (sx1-2, sy1-th-14), (sx1+tw+4, sy1-2),
+                              (0, 0, 0), -1)
+                cv2.putText(canvas, analysis["status"], (sx1, sy1-10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
 
                 # Скелет
-                for a, b in SKELETON:
-                    kp_a = person_kp[a]
-                    kp_b = person_kp[b]
-                    if kp_a[2] > KP_CONF and kp_b[2] > KP_CONF:
-                        pt1 = (int(kp_a[0]*scale_x)+video_x, int(kp_a[1]*scale_y)+50)
-                        pt2 = (int(kp_b[0]*scale_x)+video_x, int(kp_b[1]*scale_y)+50)
-                        cv2.line(canvas, pt1, pt2, (0, 0, 0), 3)
-                        cv2.line(canvas, pt1, pt2, (220, 220, 220), 1)
+                if skeleton_on:
+                    for a, b in SKELETON:
+                        kp_a = person_kp[a]
+                        kp_b = person_kp[b]
+                        if kp_a[2] > KP_CONF and kp_b[2] > KP_CONF:
+                            pt1 = (int(kp_a[0]*scale_x), int(kp_a[1]*scale_y))
+                            pt2 = (int(kp_b[0]*scale_x), int(kp_b[1]*scale_y))
+                            cv2.line(canvas, pt1, pt2, (0, 0, 0), 3)
+                            cv2.line(canvas, pt1, pt2, (220, 220, 220), 1)
 
                 # Крапки з назвами
                 for idx, kp in enumerate(person_kp):
                     x, y, c = kp
                     if c < KP_CONF:
                         continue
-                    cx = int(x * scale_x) + video_x
-                    cy = int(y * scale_y) + 50
+                    cx = int(x * scale_x)
+                    cy = int(y * scale_y)
                     dot_color = KP_COLORS.get(idx, (255, 255, 255))
                     name = KP_NAMES.get(idx, "")
 
-                    # Крапка
                     cv2.circle(canvas, (cx, cy), 7, (0, 0, 0), -1)
                     cv2.circle(canvas, (cx, cy), 5, dot_color, -1)
                     cv2.circle(canvas, (cx, cy), 7, (255, 255, 255), 1)
 
-                    # Назва з темним фоном
-                    (tw, th), _ = cv2.getTextSize(
-                        name, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-                    cv2.rectangle(canvas,
-                                  (cx + 9, cy - th - 3),
-                                  (cx + 9 + tw + 4, cy + 3),
-                                  (0, 0, 0), -1)
-                    cv2.putText(canvas, name,
-                                (cx + 11, cy),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.38,
-                                dot_color, 1, cv2.LINE_AA)
+                    if labels_on:
+                        (tw, th), _ = cv2.getTextSize(
+                            name, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+                        cv2.rectangle(canvas,
+                                      (cx+9, cy-th-3), (cx+9+tw+4, cy+3),
+                                      (0, 0, 0), -1)
+                        cv2.putText(canvas, name, (cx+11, cy),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                                    dot_color, 1, cv2.LINE_AA)
 
+    # FPS
     fps_counter += 1
     if time.time() - fps_timer >= 1:
         fps = fps_counter
         fps_counter = 0
         fps_timer = time.time()
 
-    cv2.putText(canvas, f"FPS: {fps}",
-                (video_x + VIDEO_W - 90, 50 + VIDEO_H - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-
     if light_boost_on:
-        cv2.putText(canvas, "NIGHT BOOST ON",
-                    (video_x + 10, 50 + VIDEO_H - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "NIGHT BOOST ON", (10, VIDEO_H - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 220), 1, cv2.LINE_AA)
 
-    draw_top_bar(canvas, battery)
-    draw_bottom_bar(canvas)
+    # Права панель
+    draw_panel(canvas, battery, fps, avg_light_val)
 
     cv2.imshow("Rescue AI", canvas)
 
@@ -350,6 +398,10 @@ while True:
         light_detection_on = not light_detection_on
     elif key == ord("b"):
         light_boost_on = not light_boost_on
+    elif key == ord("s"):
+        skeleton_on = not skeleton_on
+    elif key == ord("n"):
+        labels_on = not labels_on
 
 tello.streamoff()
 cv2.destroyAllWindows()
