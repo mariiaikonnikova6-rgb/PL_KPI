@@ -138,7 +138,7 @@ def draw_panel(canvas, battery, fps, avg_light=None):
             canvas[y:y+lh, px+10:px+10+lw] = logo
         y += lh + 12
     else:
-        cv2.putText(canvas, "RESCUE AI", (px+10, y+20),
+        cv2.putText(canvas, "Mireon", (px+10, y+20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 100, 200), 2, cv2.LINE_AA)
         y += 40
 
@@ -389,7 +389,7 @@ while True:
     # Права панель
     draw_panel(canvas, battery, fps, avg_light_val)
 
-    cv2.imshow("Rescue AI", canvas)
+    cv2.imshow("Mireon", canvas)
 
     key = cv2.waitKey(1) & 0xFF
     if key == ord("q"):
