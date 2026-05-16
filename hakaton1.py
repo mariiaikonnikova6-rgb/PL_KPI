@@ -1,229 +1,380 @@
 from djitellopy import Tello
 from ultralytics import YOLO
 import cv2
+import numpy as np
 import time
+
+# =========================================================
+# CONFIG
+# =========================================================
+
+FRAME_W = 512
+FRAME_H = 384
+
+MODEL_PATH = "yolov8n-pose.pt"
+
+DETECTION_INTERVAL = 3   # run YOLO every N frames
+DETECT_CONF = 0.25
+KP_CONF = 0.25
+
+LIGHT_THRESHOLD = 185
+LIGHT_AREA_MIN = 40
+
+# =========================================================
+# DRONE
+# =========================================================
 
 tello = Tello()
 tello.connect()
+
 print(f"Battery: {tello.get_battery()}%")
+
 tello.streamon()
 time.sleep(2)
 
-model = YOLO("yolov8n-pose.pt")
-
 cap = tello.get_frame_read()
 
-KEYPOINT_NAMES = {
-    0: "Nose",          1: "Left Eye",      2: "Right Eye",
-    3: "Left Ear",      4: "Right Ear",
-    5: "Left Shoulder", 6: "Right Shoulder",
-    7: "Left Elbow",    8: "Right Elbow",
-    9: "Left Wrist",    10: "Right Wrist",
-    11: "Left Hip",     12: "Right Hip",
-    13: "Left Knee",    14: "Right Knee",
-    15: "Left Ankle",   16: "Right Ankle",
-}
+# =========================================================
+# MODEL
+# =========================================================
 
-KEYPOINT_COLORS = {
-    0:  (255, 255, 0),  1:  (255, 255, 0),  2:  (255, 255, 0),
-    3:  (255, 255, 0),  4:  (255, 255, 0),
-    5:  (0, 165, 255),  6:  (0, 165, 255),
-    7:  (0, 255, 255),  8:  (0, 255, 255),
-    9:  (0, 255, 0),    10: (0, 255, 0),
-    11: (255, 0, 255),  12: (255, 0, 255),
-    13: (0, 0, 255),    14: (0, 0, 255),
-    15: (255, 165, 0),  16: (255, 165, 0),
-}
+model = YOLO(MODEL_PATH)
+
+# =========================================================
+# POSE STRUCTURE
+# =========================================================
 
 SKELETON = [
-    (0, 1),  (0, 2),  (1, 3),  (2, 4),
-    (5, 6),  (5, 7),  (7, 9),  (6, 8),  (8, 10),
-    (5, 11), (6, 12), (11, 12),
-    (11, 13),(13, 15),(12, 14),(14, 16),
+    (5, 7), (7, 9),
+    (6, 8), (8, 10),
+
+    (5, 6),
+
+    (5, 11), (6, 12),
+    (11, 12),
+
+    (11, 13), (13, 15),
+    (12, 14), (14, 16),
 ]
 
-CONF = 0.4
+LIMBS = {
+    "HEAD": [0,1,2,3,4],
+    "LEFT_ARM": [5,7,9],
+    "RIGHT_ARM": [6,8,10],
+    "TORSO": [5,6,11,12],
+    "LEFT_LEG": [11,13,15],
+    "RIGHT_LEG": [12,14,16]
+}
+
+# =========================================================
+# CACHE
+# =========================================================
+
+cached_results = None
+frame_count = 0
+
 light_detection_on = True
 
+# =========================================================
+# BODY ANALYSIS
+# =========================================================
 
-def analyze_body(keypoints, i):
-    if keypoints is None or len(keypoints.data) == 0 or i >= len(keypoints.data):
-        return None, [], (255, 255, 255), 0
+def limb_visible(kp, indices):
+    visible = 0
 
-    kp = keypoints.data[i]
+    for idx in indices:
+        if kp[idx][2] > KP_CONF:
+            visible += 1
 
-    parts = {
-        "Head":      [0, 1, 2, 3, 4],
-        "Shoulders": [5, 6],
-        "Arms":      [7, 8, 9, 10],
-        "Torso":     [11, 12],
-        "Legs":      [13, 14, 15, 16],
-    }
+    return visible / len(indices)
 
-    visible = []
-    for name, indices in parts.items():
-        count = sum(1 for idx in indices if kp[idx][2] > CONF)
-        ratio = count / len(indices)
-        if ratio >= 0.5:
-            visible.append((name, ratio))
+def analyze_pose(person_kp):
 
-    total = sum(1 for p in kp if p[2] > CONF)
-    full_ratio = total / len(kp)
+    limb_scores = {}
 
-    if full_ratio >= 0.6:
+    for limb_name, indices in LIMBS.items():
+        limb_scores[limb_name] = limb_visible(person_kp, indices)
+
+    strong_limbs = sum(score >= 0.5 for score in limb_scores.values())
+
+    avg_score = np.mean(list(limb_scores.values()))
+
+    # FULL PERSON
+    if avg_score > 0.55:
         status = "PERSON"
         color = (0, 255, 0)
-    elif len(visible) >= 2:
-        status = "FRAGMENT"
+
+    # LARGE BODY PART
+    elif strong_limbs >= 2:
+        status = "BODY FRAGMENT"
         color = (0, 165, 255)
-    elif len(visible) == 1:
-        status = "HIDDEN SURVIVOR?"
+
+    # SMALL BODY PART
+    elif strong_limbs >= 1:
+        status = "POSSIBLE SURVIVOR"
         color = (0, 0, 255)
+
     else:
-        return None, [], (255, 255, 255), 0
+        return None
 
-    return status, visible, color, int(full_ratio * 100)
+    return {
+        "status": status,
+        "color": color,
+        "scores": limb_scores
+    }
 
+# =========================================================
+# LIGHT ANALYSIS
+# =========================================================
 
 def analyze_light(frame):
+
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    avg_brightness = gray.mean()
 
-    _, bright_mask = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    bright_pixels = cv2.countNonZero(bright_mask)
-    bright_ratio = bright_pixels / (frame.shape[0] * frame.shape[1])
+    avg = gray.mean()
 
-    if avg_brightness < 40:
-        light_status = "DARK - LOW VISIBILITY"
-        light_color = (0, 0, 255)
-    elif avg_brightness > 200:
-        light_status = "OVEREXPOSED"
-        light_color = (0, 165, 255)
-    else:
-        light_status = f"LIGHT OK  avg={int(avg_brightness)}"
-        light_color = (0, 255, 0)
+    _, thresh = cv2.threshold(
+        gray,
+        LIGHT_THRESHOLD,
+        255,
+        cv2.THRESH_BINARY
+    )
 
-    signal_detected = bright_ratio > 0.005 and avg_brightness < 160
+    # REMOVE NOISE
+    kernel = np.ones((3,3), np.uint8)
 
-    return light_status, light_color, signal_detected, bright_mask
+    thresh = cv2.morphologyEx(
+        thresh,
+        cv2.MORPH_OPEN,
+        kernel
+    )
 
+    contours, _ = cv2.findContours(
+        thresh,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
 
-print("Stream starting... press L to toggle light detection, Q to quit")
+    detections = []
+
+    for cnt in contours:
+
+        area = cv2.contourArea(cnt)
+
+        if area < LIGHT_AREA_MIN:
+            continue
+
+        x, y, w, h = cv2.boundingRect(cnt)
+
+        detections.append((x, y, w, h))
+
+    return avg, detections
+
+# =========================================================
+# MAIN LOOP
+# =========================================================
+
+print("Q = quit | L = toggle light")
+
+fps_timer = time.time()
+fps_counter = 0
+fps = 0
 
 while True:
+
     frame = cap.frame
+
     if frame is None:
         continue
 
-    frame = cv2.resize(frame, (640, 480))
+    frame = cv2.resize(frame, (FRAME_W, FRAME_H))
+
+    # =====================================================
+    # YOLO EVERY N FRAMES
+    # =====================================================
+
+    if frame_count % DETECTION_INTERVAL == 0:
+
+        cached_results = model(
+            frame,
+            classes=[0],
+            conf=DETECT_CONF,
+            verbose=False
+        )
+
+    frame_count += 1
+
+    # =====================================================
+    # LIGHT DETECTION
+    # =====================================================
 
     if light_detection_on:
-        light_status, light_color, signal_detected, bright_mask = analyze_light(frame)
 
-        cv2.putText(frame, light_status,
-                    (frame.shape[1] - 310, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, light_color, 2)
+        avg_light, lights = analyze_light(frame)
 
-        if signal_detected:
-            cv2.putText(frame, ">>> SIGNAL LIGHT DETECTED <<<",
-                        (frame.shape[1] // 2 - 185, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        if avg_light < 40:
+            txt = "LOW LIGHT"
+            clr = (0,0,255)
 
-            contours, _ = cv2.findContours(
-                bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        elif avg_light > 200:
+            txt = "OVEREXPOSED"
+            clr = (0,165,255)
+
+        else:
+            txt = f"LIGHT OK {int(avg_light)}"
+            clr = (0,255,0)
+
+        cv2.putText(
+            frame,
+            txt,
+            (10,30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            clr,
+            2
+        )
+
+        for (x,y,w,h) in lights:
+
+            cv2.rectangle(
+                frame,
+                (x,y),
+                (x+w,y+h),
+                (255,255,0),
+                2
             )
-            for cnt in contours:
-                if cv2.contourArea(cnt) > 25:
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
-                    cv2.putText(frame, "LIGHT",
-                                (x, y - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-    else:
-        cv2.putText(frame, "LIGHT DETECT: OFF",
-                    (frame.shape[1] - 310, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 2)
 
-    results = model(frame, classes=[0], verbose=False)
+            cv2.putText(
+                frame,
+                "LIGHT",
+                (x, y - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255,255,0),
+                1
+            )
 
-    for r in results:
-        boxes = r.boxes
-        keypoints = r.keypoints
+    # =====================================================
+    # DRAW DETECTIONS
+    # =====================================================
 
-        for i, box in enumerate(boxes):
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            conf = float(box.conf[0])
+    if cached_results is not None:
 
-            try:
-                status, visible_parts, color, body_pct = analyze_body(keypoints, i)
-            except Exception:
-                status, visible_parts, color, body_pct = "PERSON", [], (0, 255, 0), int(conf * 100)
+        for r in cached_results:
 
-            if status is None:
+            if r.boxes is None or r.keypoints is None:
                 continue
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            boxes = r.boxes
+            keypoints = r.keypoints.data
 
-            cv2.putText(frame, f"{status} {conf:.0%}",
-                        (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            for i, person_kp in enumerate(keypoints):
 
-            if visible_parts:
-                parts_text = " | ".join(
-                    f"{name} {int(r * 100)}%" for name, r in visible_parts
+                analysis = analyze_pose(person_kp)
+
+                if analysis is None:
+                    continue
+
+                x1, y1, x2, y2 = map(
+                    int,
+                    boxes[i].xyxy[0]
                 )
-                cv2.putText(frame, parts_text,
-                            (x1, y2 + 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-            if status == "HIDDEN SURVIVOR?":
-                cv2.putText(frame, ">>> CHECK THIS AREA <<<",
-                            (x1, y1 - 35),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                color = analysis["color"]
 
-        if keypoints is not None:
-            for person_kp in keypoints.data:
+                # BOX
+                cv2.rectangle(
+                    frame,
+                    (x1,y1),
+                    (x2,y2),
+                    color,
+                    2
+                )
 
+                # STATUS
+                cv2.putText(
+                    frame,
+                    analysis["status"],
+                    (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    color,
+                    2
+                )
+
+                # SKELETON
                 for a, b in SKELETON:
+
                     kp_a = person_kp[a]
                     kp_b = person_kp[b]
-                    if kp_a[2] > CONF and kp_b[2] > CONF:
+
+                    if kp_a[2] > KP_CONF and kp_b[2] > KP_CONF:
+
                         pt1 = (int(kp_a[0]), int(kp_a[1]))
                         pt2 = (int(kp_b[0]), int(kp_b[1]))
-                        cv2.line(frame, pt1, pt2, (255, 255, 255), 1)
 
-                for idx, kp in enumerate(person_kp):
-                    x, y, conf_kp = float(kp[0]), float(kp[1]), float(kp[2])
-                    if conf_kp < CONF:
+                        cv2.line(
+                            frame,
+                            pt1,
+                            pt2,
+                            (255,255,255),
+                            2
+                        )
+
+                # KEYPOINTS
+                for kp in person_kp:
+
+                    x, y, c = kp
+
+                    if c < KP_CONF:
                         continue
 
-                    cx, cy = int(x), int(y)
-                    dot_color = KEYPOINT_COLORS.get(idx, (255, 255, 255))
-                    name = KEYPOINT_NAMES.get(idx, "")
+                    cv2.circle(
+                        frame,
+                        (int(x), int(y)),
+                        4,
+                        color,
+                        -1
+                    )
 
-                    cv2.circle(frame, (cx, cy), 6, dot_color, -1)
-                    cv2.circle(frame, (cx, cy), 8, (0, 0, 0), 1)
-                    cv2.putText(frame, name,
-                                (cx + 10, cy + 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, dot_color, 1)
+    # =====================================================
+    # FPS
+    # =====================================================
 
-    cv2.putText(frame, "GREEN  = Full person",     (10, 340), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-    cv2.putText(frame, "ORANGE = Body fragment",   (10, 358), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1)
-    cv2.putText(frame, "RED    = Hidden survivor", (10, 376), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
-    cv2.putText(frame, "CYAN   = Signal light",    (10, 394), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
-    cv2.putText(frame, "YELLOW=Head  ORANGE=Shoulder  CYAN=Elbow", (10, 416), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-    cv2.putText(frame, "GREEN=Wrist  PURPLE=Hip  RED=Knee",         (10, 434), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-    cv2.putText(frame, "L - toggle light  |  Q - quit",            (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    fps_counter += 1
 
-    cv2.imshow("Fragment Rescue AI", frame)
+    if time.time() - fps_timer >= 1:
+        fps = fps_counter
+        fps_counter = 0
+        fps_timer = time.time()
+
+    cv2.putText(
+        frame,
+        f"FPS: {fps}",
+        (10, FRAME_H - 15),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255,255,255),
+        2
+    )
+
+    # =====================================================
+    # SHOW
+    # =====================================================
+
+    cv2.imshow("Rescue AI", frame)
 
     key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
+
+    if key == ord("q"):
         break
-    elif key == ord('l'):
+
+    elif key == ord("l"):
         light_detection_on = not light_detection_on
-        state = "ON" if light_detection_on else "OFF"
-        print(f"Light detection: {state}")
+
+# =========================================================
+# CLEANUP
+# =========================================================
 
 tello.streamoff()
 cv2.destroyAllWindows()
